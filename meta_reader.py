@@ -553,9 +553,11 @@ class MetaReader:
 						"default": "",
 						"multiline": False,
 						"tooltip": (
-							"If non-empty, pick the file whose data['id'] matches.\n"
-							"Overrides pick_mode when found, and reaches any file in\n"
-							"the folder including .json records."
+							"Leave EMPTY to pick with pick_mode.\n\n"
+							"Any value here overrides pick_mode entirely and looks\n"
+							"for the one file whose data['id'] matches — including\n"
+							".json records. A stray value (a '0' left behind, say)\n"
+							"therefore stops the pick modes from doing anything."
 						),
 					},
 				),
@@ -1025,11 +1027,20 @@ class MetaReader:
 			rng = random.Random(pick_seed) if pick_seed else random.Random()
 
 			if id_filter:
+				# id_filter quietly outranks pick_mode, so a stray value here —
+				# a stale widget, a number shifted in from a reordered graph —
+				# looks exactly like the pick modes having stopped working.
+				print(
+					f"[MetaReader] id_filter={id_filter!r} overrides pick_mode="
+					f"{pick_mode!r}: looking for that one id instead of picking. "
+					f"Clear id_filter to pick by mode again."
+				)
 				path = self._find_by_id(entries, id_filter)
 				if not path:
 					raise RuntimeError(
-						f"[MetaReader] id_filter={id_filter!r} not found in {resolved} "
-						f"(no file has data['id'] == that value)."
+						f"[MetaReader] id_filter={id_filter!r} matched none of "
+						f"{len(entries)} files in {resolved}. Clear id_filter if you "
+						f"meant to pick with pick_mode={pick_mode!r}."
 					)
 				return path, read_record(load_json_data(path))
 			else:
