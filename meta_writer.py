@@ -147,6 +147,13 @@ class MetaWriter:
 						"tooltip": "Image id. A UUID is generated when left empty.",
 					},
 				),
+				"parentId": (
+					"STRING",
+					{
+						"default": "",
+						"tooltip": "Optional id of the reference image; omitted when empty.",
+					},
+				),
 				"save_timeout": (
 					"INT",
 					{
@@ -158,13 +165,6 @@ class MetaWriter:
 							"On expiry this generation is abandoned so the queue\n"
 							"moves on; the writes continue in the background."
 						),
-					},
-				),
-				"parentId": (
-					"STRING",
-					{
-						"default": "",
-						"tooltip": "Optional id of the reference image; omitted when empty.",
 					},
 				),
 			},
