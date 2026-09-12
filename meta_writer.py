@@ -3,6 +3,7 @@ import json
 import os
 import re
 import threading
+import time
 import uuid
 
 from PIL import Image
@@ -13,9 +14,19 @@ import folder_paths
 from comfy.cli_args import args
 
 
-# Hard ceiling on disk I/O for one image. Slower than this and we abort so
-# ComfyUI's prompt queue can move on rather than hang.
+# Ceiling on disk I/O for one save_images call — the whole batch, not each
+# image, so a batch of four can't stall the queue for four times as long.
 _SAVE_TIMEOUT_SECONDS = 30.0
+
+# Writes run concurrently: encoding a PNG costs tens of milliseconds while the
+# write can take seconds on network storage, so overlapping them is nearly all
+# win. The cap matters more than the parallelism though — a Python thread cannot
+# be killed, so an abandoned write keeps running after its timeout. Holding a
+# slot for the thread's real lifetime means those stragglers throttle the next
+# call instead of accumulating without limit, which is how a slow volume turns
+# into a hung queue.
+_MAX_CONCURRENT_WRITES = 4
+_WRITE_SLOTS = threading.BoundedSemaphore(_MAX_CONCURRENT_WRITES)
 
 # PNG tEXt key holding our metadata blob.
 METADATA_KEY = "gen_meta"
@@ -54,11 +65,16 @@ def _write_png_atomic(full_path: str, img: Image.Image,
 				pass
 
 
-def _write_with_timeout(write_fn, args_tuple, timeout: float, label: str) -> None:
-	"""Run `write_fn(*args_tuple)` in a daemon thread; wait at most `timeout`
-	seconds. Raises RuntimeError on timeout. Re-raises any exception the
-	worker hit. Returns normally on success."""
-	exc_box: list[BaseException] = []
+def _spawn_write(write_fn, args_tuple, label: str):
+	"""Run write_fn(*args_tuple) on a daemon thread that already holds a write
+	slot. Returns (done_event, exception_box); the caller decides how long to
+	wait. The slot is released only when the thread genuinely finishes, so an
+	abandoned write still counts against the concurrency cap.
+
+	Daemon threads on purpose: ThreadPoolExecutor joins its workers at exit,
+	which would hang ComfyUI's shutdown behind a stuck network write.
+	"""
+	exc_box: list = []
 	done = threading.Event()
 
 	def _worker():
@@ -68,18 +84,10 @@ def _write_with_timeout(write_fn, args_tuple, timeout: float, label: str) -> Non
 			exc_box.append(e)
 		finally:
 			done.set()
+			_WRITE_SLOTS.release()
 
-	t = threading.Thread(target=_worker, name=f"MetaWriter-{label}", daemon=True)
-	t.start()
-	if not done.wait(timeout):
-		raise RuntimeError(
-			f"MetaWriter: disk write for {label} did not complete within "
-			f"{timeout:.0f}s; aborting so ComfyUI can move on. The orphaned "
-			f"write thread will continue in the background and exit with the "
-			f"ComfyUI process."
-		)
-	if exc_box:
-		raise exc_box[0]
+	threading.Thread(target=_worker, name=f"MetaWriter-{label}", daemon=True).start()
+	return done, exc_box
 
 
 class MetaWriter:
@@ -137,6 +145,19 @@ class MetaWriter:
 					{
 						"default": "",
 						"tooltip": "Image id. A UUID is generated when left empty.",
+					},
+				),
+				"save_timeout": (
+					"INT",
+					{
+						"default": int(_SAVE_TIMEOUT_SECONDS),
+						"min": 1,
+						"max": 600,
+						"tooltip": (
+							"Seconds to wait for the whole batch to reach disk.\n"
+							"On expiry this generation is abandoned so the queue\n"
+							"moves on; the writes continue in the background."
+						),
 					},
 				),
 				"parentId": (
@@ -204,6 +225,7 @@ class MetaWriter:
 		intermediate_prompt_3="",
 		id="",
 		parentId="",
+		save_timeout=int(_SAVE_TIMEOUT_SECONDS),
 		workflow_prompt=None,
 		extra_pnginfo=None,
 	):
@@ -227,17 +249,18 @@ class MetaWriter:
 		# is left alone — it may legitimately contain slashes for nested folders.
 		base_stem = _safe_filename_stem(filename if (filename or "").strip() else image_id)
 
-		results = []
+		deadline = time.monotonic() + max(1.0, float(save_timeout))
 
+		def left():
+			return max(0.0, deadline - time.monotonic())
+
+		# Encode everything first. This is the cheap half — tens of milliseconds
+		# per image — and doing it up front means the writes, which are the slow
+		# half on network storage, all overlap.
+		staged = []
 		for idx, image in enumerate(images):
-			if len(images) == 1:
-				save_name = f"{base_stem}.png"
-			else:
-				save_name = f"{base_stem}_{idx:05}.png"
+			save_name = f"{base_stem}.png" if len(images) == 1 else f"{base_stem}_{idx:05}.png"
 
-			save_path = os.path.join(out_dir, save_name)
-
-			# Convert tensor → uint8 PNG
 			i = 255.0 * image.cpu().numpy()
 			img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
 
@@ -253,32 +276,45 @@ class MetaWriter:
 					for k, v in extra_pnginfo.items():
 						metadata.add_text(k, json.dumps(v))
 
-			# Save with a hard timeout so a stalled filesystem can't block the
-			# ComfyUI prompt queue forever. Any failure (timeout, permission,
-			# disk full, PIL encode error, …) raises RuntimeError out of this
-			# node; ComfyUI catches it, logs it, and moves on to the next prompt.
-			try:
-				_write_with_timeout(
-					_write_png_atomic,
-					(save_path, img, metadata, self.compress_level),
-					_SAVE_TIMEOUT_SECONDS,
-					label=save_name,
+			staged.append((save_name, os.path.join(out_dir, save_name), img, metadata))
+
+		pending = []
+		for save_name, save_path, img, metadata in staged:
+			# Waiting for a slot is the backpressure: if earlier writes are
+			# still stuck, this blocks and then trips the deadline instead of
+			# adding yet another thread to a struggling volume.
+			if not _WRITE_SLOTS.acquire(timeout=left()):
+				raise RuntimeError(
+					f"[MetaWriter] timed out after {save_timeout}s waiting for a "
+					f"write slot — {_MAX_CONCURRENT_WRITES} earlier writes are "
+					f"still unfinished. The output volume is not keeping up."
 				)
-			except RuntimeError:
-				raise
-			except BaseException as e:  # noqa: BLE001
+			done, exc_box = _spawn_write(
+				_write_png_atomic,
+				(save_path, img, metadata, self.compress_level),
+				label=save_name,
+			)
+			pending.append((save_name, save_path, done, exc_box))
+
+		for save_name, save_path, done, exc_box in pending:
+			if not done.wait(left()):
+				stuck = [n for n, _, d, _ in pending if not d.is_set()]
+				raise RuntimeError(
+					f"[MetaWriter] {len(stuck)} write(s) did not finish within "
+					f"{save_timeout}s ({', '.join(stuck)}); abandoning this "
+					f"generation so the queue can move on. They continue in the "
+					f"background and will throttle the next save until they end."
+				)
+			if exc_box:
+				e = exc_box[0]
 				raise RuntimeError(
 					f"[MetaWriter] failed to save {save_path}: "
 					f"{type(e).__name__}: {e}"
 				) from e
-
-			results.append(
-				{
-					"filename": save_name,
-					"subfolder": filename_prefix,
-					"type": self.type,
-				}
-			)
+		results = [
+			{"filename": name, "subfolder": filename_prefix, "type": self.type}
+			for name, _, _, _ in pending
+		]
 
 		print(f"[MetaWriter] saved {len(results)} image(s) id={image_id}")
 

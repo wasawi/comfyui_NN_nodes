@@ -47,6 +47,14 @@ reported instead of being silently swapped for another file.
 Saves images as PNG with the metadata record embedded in a `gen_meta` text
 chunk, alongside ComfyUI's own workflow chunk.
 
+Writes run concurrently and share one deadline for the whole batch
+(`save_timeout`, 30s by default). Encoding a PNG costs milliseconds while the
+write can take seconds on network storage, so overlapping them is nearly all
+win. At most four writes run at once: a Python thread cannot be killed, so a
+write abandoned at the deadline keeps going, and holding its slot until it truly
+ends means stragglers throttle the next save instead of accumulating. When the
+deadline passes the generation is abandoned so the queue moves on.
+
 ### Wildcard Raw Text
 
 `ImpactWildcardProcessor` and `ImpactWildcardEncode` expose only their populated
@@ -96,6 +104,7 @@ exiftool -j image.png | jq '.[0].Gen_meta | fromjson | {prompt, negative}'
 
 ```sh
 python tests/test_meta_reader.py
+python tests/test_meta_writer.py
 python tests/test_never_blocks.py
 python tests/test_wildcard_raw_text.py
 node   tests/test_scope_reference.mjs
