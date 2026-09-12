@@ -107,7 +107,7 @@ hostile = [
 	dict(load_reference=True, folder="output/busy_folder", pick_mode="not_a_mode"),
 	dict(load_reference=True, folder="output/busy_folder", pick_mode="fixed", fixed_index=10**9),
 	dict(load_reference=True, folder="output/busy_folder", pick_mode="random", sort_by="bogus"),
-	dict(load_reference=True, folder="output/busy_folder", pick_mode="random", seed=2**63),
+	dict(load_reference=True, folder="output/busy_folder", pick_mode="random", pick_seed=2**63),
 	dict(load_reference=True, folder="output/busy_folder", pick_mode="random", prompt_filter="zzz-no-match"),
 	dict(load_reference=True, folder="output/busy_folder", pick_mode="random", id_filter="nope"),
 	dict(load_reference=True, folder="output/busy_folder", pick_mode="random", folder_override=str(a_file)),

@@ -29,7 +29,9 @@ Picks one `.json` / `.png` / `.jpg` from a folder and outputs its prompt.
   The same value resolves correctly on different machines, so a workflow moves
   between a local install and a remote one without editing paths.
 - **reference** — the file used by `manual` mode, with a thumbnail preview.
-  Images only: a `.json` has nothing to show.
+  Images only: a `.json` has nothing to show. In `manual` mode `folder` is
+  ignored and JSON records are unreachable — use an automatic pick mode or
+  `id_filter` for those.
 - **prompt_filter** — restricts the automatic modes to files whose prompt
   contains the given text.
 - **id_filter** — jumps straight to the file with a given `id`, reaching any

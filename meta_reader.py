@@ -603,16 +603,20 @@ class MetaReader:
 						"tooltip": "Include files in subfolders.",
 					},
 				),
-				"seed": (
+				"pick_seed": (
 					"INT",
 					{
 						"default": 0,
 						"min": 0,
 						"max": 0xFFFFFFFFFFFFFFFF,
 						"tooltip": (
-							"Controls the random pick modes.\n"
-							"0 = different every run; any other value repeats\n"
-							"the same pick, so a run can be recreated."
+							"0 = a different file every run. This is what you want.\n\n"
+							"Any other value pins the random modes to one specific\n"
+							"file, forever — it exists only to recreate an earlier\n"
+							"run. Deliberately not called 'seed': ComfyUI attaches a\n"
+							"control_after_generate dropdown to any widget with that\n"
+							"name, and leaving it on 'fixed' silently stops the\n"
+							"random modes from being random."
 						),
 					},
 				),
@@ -988,7 +992,7 @@ class MetaReader:
 		fixed_index: int,
 		sort_by: str,
 		recursive: bool,
-		seed: int,
+		pick_seed: int,
 		folder_override: str,
 		unique_id,
 	):
@@ -998,6 +1002,14 @@ class MetaReader:
 		id_filter = (id_filter or "").strip()
 
 		if mode == "manual" and not id_filter:
+			# Easy to trip over: manual reads the reference combo, which lists
+			# images only, and never touches `folder`. A JSON-only library is
+			# invisible here, which looks like "it stopped reading my files".
+			print(
+				f"[MetaReader] pick_mode=manual: reading the selected image only. "
+				f"folder={folder!r} is ignored, and .json records cannot be chosen "
+				f"this way — use an automatic pick_mode, or id_filter."
+			)
 			return self._load_manual(reference)
 		else:
 			resolved = self._resolve_folder(folder, folder_override)
@@ -1005,7 +1017,12 @@ class MetaReader:
 			# Folder is part of the key so pointing the node elsewhere restarts
 			# the walk instead of resuming at a position from the previous folder.
 			node_key = f"{unique_id}:{resolved}"
-			rng = random.Random(seed) if seed else random.Random()
+			if pick_seed:
+				print(
+					f"[MetaReader] pick_seed={pick_seed} is set, so '{mode}' will "
+					f"return the same file every run. Set it to 0 for a new pick."
+				)
+			rng = random.Random(pick_seed) if pick_seed else random.Random()
 
 			if id_filter:
 				path = self._find_by_id(entries, id_filter)
@@ -1033,7 +1050,7 @@ class MetaReader:
 		fixed_index: int = 0,
 		sort_by: str = "newest",
 		recursive: bool = False,
-		seed: int = 0,
+		pick_seed: int = 0,
 		folder_override: str = "",
 		unique_id=None,
 	):
@@ -1055,7 +1072,7 @@ class MetaReader:
 		try:
 			path, record = self._acquire(
 				folder, pick_mode, reference, id_filter, prompt_filter,
-				fixed_index, sort_by, recursive, seed, folder_override, unique_id,
+				fixed_index, sort_by, recursive, pick_seed, folder_override, unique_id,
 			)
 		except Exception as e:
 			# A missing folder, an unreadable file, a filter that matches nothing,
