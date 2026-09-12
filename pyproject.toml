@@ -1,0 +1,17 @@
+[project]
+name = "comfyui_NN_nodes"
+description = "A personal ComfyUI node pack: image-generation metadata reader/writer with prompt lineage, and raw wildcard text recovery."
+version = "1.0.0"
+requires-python = ">=3.9"
+dependencies = []          # Pillow and numpy ship with ComfyUI
+# TODO before publishing: add a LICENSE file and uncomment the line below.
+# license = { file = "LICENSE" }
+
+[project.urls]
+Repository = "https://github.com/wasawi/comfyui_NN_nodes"
+
+[tool.comfy]
+# TODO: your publisher id from https://registry.comfy.org
+PublisherId = "CHANGEME"
+DisplayName = "NN Nodes"
+Icon = ""
