@@ -248,6 +248,87 @@ res = result_of(load_reference=True, folder="output/does_not_exist", pick_mode="
 check("nothing loadable and no input -> empty string", res[0] == "" and res[1] == "")
 check("run_id still produced on the failure path", len(res[7]) == 36)
 
+# ---------- listing cost: the random modes must not stat every file ----------
+import io
+import contextlib as _ctx
+
+perf = OUT / "perf"
+perf.mkdir()
+for i in range(30):
+	(perf / f"r{i:02d}.json").write_text(json.dumps({"id": f"r{i}", "prompt": f"p{i}"}))
+
+
+class _CountingEntry:
+	def __init__(self, e, counter):
+		self._e, self._c, self.name, self.path = e, counter, e.name, e.path
+
+	def stat(self, *a, **k):
+		self._c["n"] += 1
+		return self._e.stat(*a, **k)
+
+	def is_file(self, *a, **k):
+		self._c["n"] += 1  # may stat when the filesystem gives no d_type
+		return self._e.is_file(*a, **k)
+
+
+def stat_calls(**kw):
+	counter = {"n": 0}
+	real = M.os.scandir
+
+	@_ctx.contextmanager
+	def counting(path):
+		with real(path) as it:
+			yield [_CountingEntry(e, counter) for e in it]
+
+	M.os.scandir = counting
+	try:
+		R._list_candidates(str(perf), False, **kw)
+	finally:
+		M.os.scandir = real
+	return counter["n"]
+
+
+check("unordered listing stats no files",
+      stat_calls(sort_by="newest", ordered=False, need_mtime=False) == 0)
+check("date-ordered listing stats each file once",
+      stat_calls(sort_by="newest", ordered=True) == 30)
+check("name-ordered listing stats no files",
+      stat_calls(sort_by="name", ordered=True) == 0)
+
+
+def quiet_extract(**kw):
+	with _ctx.redirect_stdout(io.StringIO()):
+		return R.extract(**kw)["result"]
+
+
+a = quiet_extract(load_reference=True, folder="output/perf", pick_mode="random", pick_seed=7, unique_id="s1")
+b = quiet_extract(load_reference=True, folder="output/perf", pick_mode="random", pick_seed=7, unique_id="s2")
+check("pick_seed stays reproducible without mtimes", a[5] == b[5] and a[5] != "", (a[5], b[5]))
+
+trap = OUT / "trapdir"
+trap.mkdir()
+(trap / "decoy.json").mkdir()
+(trap / "real.json").write_text(json.dumps({"id": "real", "prompt": "the real one"}))
+check("a directory named *.json is stepped over",
+      all(quiet_extract(load_reference=True, folder="output/trapdir", pick_mode="random",
+                        unique_id=f"t{i}")[0] == "the real one" for i in range(20)))
+
+# prompt_filter in a random mode still needs mtimes, or the prompt cache would
+# keep serving a file's old text after it is edited.
+editdir = OUT / "editme"
+editdir.mkdir()
+ef = editdir / "e.json"
+ef.write_text(json.dumps({"id": "e", "prompt": "before"}))
+os.utime(ef, (1000, 1000))
+first = quiet_extract(load_reference=True, folder="output/editme", pick_mode="random",
+                      prompt_filter="before", unique_id="pf1")[0]
+ef.write_text(json.dumps({"id": "e", "prompt": "after"}))
+os.utime(ef, (2000, 2000))
+second = quiet_extract(load_reference=True, folder="output/editme", pick_mode="random",
+                       prompt_filter="after", unique_id="pf2")[0]
+check("prompt_filter in random mode sees an edited file",
+      first == "before" and second == "after", (first, second))
+
 print()
 print("FAILED: " + ", ".join(fails) if fails else "ALL PASS")
 sys.exit(1 if fails else 0)
