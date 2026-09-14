@@ -11,11 +11,13 @@ wildcard node, which those nodes never expose as an output.
 
 from .meta_reader import MetaReader
 from .meta_writer import MetaWriter
+from .meta_video_writer import MetaVideoWriter
 from .wildcard_raw_text import WildcardRawText, WildcardRawTextById
 
 NODE_CLASS_MAPPINGS = {
 	"MetaReader": MetaReader,
 	"MetaWriter": MetaWriter,
+	"MetaVideoWriter": MetaVideoWriter,
 	"WildcardRawText": WildcardRawText,
 	"WildcardRawTextById": WildcardRawTextById,
 }
@@ -23,6 +25,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
 	"MetaReader": "Metadata Reader",
 	"MetaWriter": "Metadata Writer",
+	"MetaVideoWriter": "Metadata Video Writer",
 	"WildcardRawText": "Wildcard Raw Text",
 	"WildcardRawTextById": "Wildcard Raw Text (by node id)",
 }

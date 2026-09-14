@@ -57,6 +57,29 @@ write abandoned at the deadline keeps going, and holding its slot until it truly
 ends means stragglers throttle the next save instead of accumulating. When the
 deadline passes the generation is abandoned so the queue moves on.
 
+### Metadata Video Writer
+
+Saves a video with the same metadata record, in a `gen_meta` container tag next
+to ComfyUI's `prompt` and `workflow` tags, so dropping the video onto ComfyUI
+still loads its workflow. The video is written by ComfyUI's own code — the same
+`video.save_to()` call its **Save Video** node makes — with the same `format`,
+`codec` and `crf` choices (`crf` -1 keeps ComfyUI's default).
+
+- **Never replaces a file.** If `clip.mp4` exists the video becomes
+  `clip_1.mp4`, then `clip_2.mp4`, … The final name is claimed with a hard link,
+  which fails on a taken name, so two saves racing for one name can't clobber
+  each other; volumes without hard links check first and then rename.
+- **First frame as a PNG** (`save_first_frame`, on by default) next to the video,
+  with the same number and the same metadata. The Metadata Reader only reads
+  images, so this is what lets it pick a video's prompt as a reference; it also
+  gives the video a thumbnail.
+- **Long deadline.** Encoding and writing share one `save_timeout` (300s by
+  default, up to an hour). At most two saves run at once and an abandoned save
+  keeps its slot until it truly ends, as in the image writer. The video is
+  encoded under a hidden temporary name ending in its real extension (MP4 only
+  keeps custom tags such as `gen_meta` then) and renamed when complete, so a
+  half-written video never appears.
+
 ### Wildcard Raw Text
 
 `ImpactWildcardProcessor` and `ImpactWildcardEncode` expose only their populated
@@ -107,6 +130,7 @@ exiftool -j image.png | jq '.[0].Gen_meta | fromjson | {prompt, negative}'
 ```sh
 python tests/test_meta_reader.py
 python tests/test_meta_writer.py
+COMFYUI_DIR=/path/to/ComfyUI python tests/test_meta_video_writer.py  # with ComfyUI's Python
 python tests/test_never_blocks.py
 python tests/test_wildcard_raw_text.py
 node   tests/test_scope_reference.mjs
@@ -117,7 +141,9 @@ module and drives it through real folder changes. `node --check` only parses a
 file; it cannot catch a variable used outside the block it was declared in.
 
 No ComfyUI required; the suites stub `folder_paths` and work on synthetic
-fixtures.
+fixtures — except the video writer's, which runs ComfyUI's real video code
+and so needs ComfyUI's Python and a checkout (`COMFYUI_DIR`); it skips
+itself otherwise.
 
 ## Publishing
 
