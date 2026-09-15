@@ -45,20 +45,92 @@ def _safe_filename_stem(raw: str) -> str:
 	return cleaned[:200]
 
 
-def _write_png_atomic(full_path: str, img: Image.Image,
-                      pnginfo: PngInfo, compress_level: int) -> None:
-	"""Save img as PNG to full_path via tmp + os.replace. Caller catches."""
-	parent = os.path.dirname(full_path)
-	if parent:
-		os.makedirs(parent, exist_ok=True)
-	tmp = f"{full_path}.{uuid.uuid4().hex[:8]}.tmp"
+# Next number to try per (directory, stem). Saving the same name repeatedly would
+# otherwise re-probe image.png, image_1.png, … from zero on every run — one
+# filesystem round trip per existing file, which is slow on network storage.
+# Process-local: the first save after a restart probes once from zero.
+_NEXT_NUMBER: dict = {}
+_NUMBER_LOCK = threading.Lock()
+
+
+def _numbered(stem: str, n: int, ext: str) -> str:
+	return f"{stem}.{ext}" if n == 0 else f"{stem}_{n}.{ext}"
+
+
+def _claim_name(tmp_path: str, directory: str, stem: str, ext: str,
+                start: int = 0) -> tuple:
+	"""Give tmp_path its final name — stem.ext, else stem_1.ext, stem_2.ext… —
+	without ever replacing an existing file. Returns (name, number).
+
+	Same naming as the video writer. os.link refuses a name that is taken, so
+	the claim is atomic even when another save picks the same name at once.
+	"""
+	n = start
+	while True:
+		name = _numbered(stem, n, ext)
+		target = os.path.join(directory, name)
+		try:
+			os.link(tmp_path, target)
+		except FileExistsError:
+			n += 1
+			continue
+		except OSError:
+			# No hard links on this volume (some network mounts). Take the name
+			# with an exclusive create instead — still atomic, still ours alone —
+			# then move the image onto that empty placeholder.
+			try:
+				fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+			except FileExistsError:
+				n += 1
+				continue
+			os.close(fd)
+			try:
+				os.replace(tmp_path, target)
+			except BaseException:
+				try:
+					os.remove(target)
+				except OSError:
+					pass
+				raise
+			return name, n
+		os.remove(tmp_path)
+		return name, n
+
+
+def _write_png_tmp(tmp_path: str, img: Image.Image, pnginfo: PngInfo,
+                   compress_level: int) -> None:
+	# Explicit format=PNG; PIL would otherwise infer it from the .tmp suffix.
+	img.save(tmp_path, format="PNG", pnginfo=pnginfo, compress_level=compress_level)
+
+
+def _save_one(directory, stem, img, pnginfo, compress_level,
+              idx, claimed, numbers, names, deadline) -> None:
+	"""Write one image of a batch, then give it the next free name. Caller catches."""
+	tmp = None
 	try:
-		# Explicit format=PNG; otherwise PIL infers from the .tmp suffix and
-		# raises ValueError("unknown file extension: .tmp").
-		img.save(tmp, format="PNG", pnginfo=pnginfo, compress_level=compress_level)
-		os.replace(tmp, full_path)
+		os.makedirs(directory, exist_ok=True)
+		# Hidden, and ending in .tmp rather than .png, so the reader never lists
+		# a half-written file.
+		tmp = os.path.join(directory, f".{stem}.{uuid.uuid4().hex[:8]}.png.tmp")
+		_write_png_tmp(tmp, img, pnginfo, compress_level)
+
+		# Keep the batch in order, but never wait past the deadline: a stuck
+		# neighbour must not strand this image unsaved.
+		if idx:
+			claimed[idx - 1].wait(max(0.0, deadline - time.monotonic()))
+		prev = numbers[idx - 1] if idx else None
+		start = prev + 1 if prev is not None else 0
+		key = (directory, stem)
+		with _NUMBER_LOCK:
+			start = max(start, _NEXT_NUMBER.get(key, 0))
+		name, n = _claim_name(tmp, directory, stem, "png", start)
+		numbers[idx] = n
+		names[idx] = name
+		with _NUMBER_LOCK:
+			_NEXT_NUMBER[key] = max(_NEXT_NUMBER.get(key, 0), n + 1)
 	finally:
-		if os.path.exists(tmp):
+		claimed[idx].set()
+		if tmp and os.path.exists(tmp):
 			try:
 				os.remove(tmp)
 			except OSError:
@@ -115,7 +187,8 @@ class MetaWriter:
 						"default": "image",
 						"tooltip": (
 							"Base filename without extension; falls back to the id when\n"
-							"empty. Batch index is appended if needed."
+							"empty. An existing file is never replaced: a taken name\n"
+							"moves to _1, _2, … and a batch numbers its images the same way."
 						),
 					},
 				),
@@ -258,9 +331,7 @@ class MetaWriter:
 		# per image — and doing it up front means the writes, which are the slow
 		# half on network storage, all overlap.
 		staged = []
-		for idx, image in enumerate(images):
-			save_name = f"{base_stem}.png" if len(images) == 1 else f"{base_stem}_{idx:05}.png"
-
+		for image in images:
 			i = 255.0 * image.cpu().numpy()
 			img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
 
@@ -276,10 +347,19 @@ class MetaWriter:
 					for k, v in extra_pnginfo.items():
 						metadata.add_text(k, json.dumps(v))
 
-			staged.append((save_name, os.path.join(out_dir, save_name), img, metadata))
+			staged.append((img, metadata))
+
+		# A file is only named once it is fully written, because a taken name is
+		# never replaced — it moves on to the next number. Each image waits for
+		# the one before it to take its number, so a batch keeps its order.
+		count = len(staged)
+		claimed = [threading.Event() for _ in range(count)]
+		numbers: list = [None] * count
+		names: list = [None] * count
 
 		pending = []
-		for save_name, save_path, img, metadata in staged:
+		for idx, (img, metadata) in enumerate(staged):
+			label = f"{base_stem}[{idx}]"
 			# Waiting for a slot is the backpressure: if earlier writes are
 			# still stuck, this blocks and then trips the deadline instead of
 			# adding yet another thread to a struggling volume.
@@ -290,15 +370,16 @@ class MetaWriter:
 					f"still unfinished. The output volume is not keeping up."
 				)
 			done, exc_box = _spawn_write(
-				_write_png_atomic,
-				(save_path, img, metadata, self.compress_level),
-				label=save_name,
+				_save_one,
+				(out_dir, base_stem, img, metadata, self.compress_level,
+				 idx, claimed, numbers, names, deadline),
+				label=label,
 			)
-			pending.append((save_name, save_path, done, exc_box))
+			pending.append((label, done, exc_box))
 
-		for save_name, save_path, done, exc_box in pending:
+		for label, done, exc_box in pending:
 			if not done.wait(left()):
-				stuck = [n for n, _, d, _ in pending if not d.is_set()]
+				stuck = [lb for lb, d, _ in pending if not d.is_set()]
 				raise RuntimeError(
 					f"[MetaWriter] {len(stuck)} write(s) did not finish within "
 					f"{save_timeout}s ({', '.join(stuck)}); abandoning this "
@@ -308,12 +389,25 @@ class MetaWriter:
 			if exc_box:
 				e = exc_box[0]
 				raise RuntimeError(
-					f"[MetaWriter] failed to save {save_path}: "
+					f"[MetaWriter] failed to save {label} in {out_dir}: "
 					f"{type(e).__name__}: {e}"
 				) from e
+
+		moved = [
+			(_numbered(base_stem, i, "png"), got)
+			for i, got in enumerate(names)
+			if got != _numbered(base_stem, i, "png")
+		]
+		if moved:
+			print(
+				f"[MetaWriter] {len(moved)} name(s) already taken; saved under the "
+				f"next free number instead: "
+				+ ", ".join(f"{want} -> {got}" for want, got in moved)
+			)
+
 		results = [
 			{"filename": name, "subfolder": filename_prefix, "type": self.type}
-			for name, _, _, _ in pending
+			for name in names
 		]
 
 		print(f"[MetaWriter] saved {len(results)} image(s) id={image_id}")

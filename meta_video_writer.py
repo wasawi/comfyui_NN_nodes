@@ -77,12 +77,25 @@ def _claim_name(tmp_path: str, directory: str, stem: str, ext: str,
 			n += 1
 			continue
 		except OSError:
-			# no hard links on this volume (some network or FAT drives):
-			# check first, then rename — a tiny race, but never a silent replace
-			if os.path.lexists(target):
+			# No hard links on this volume (some network or FAT drives). Take the
+			# name with an exclusive create — atomic, so a concurrent save can't
+			# take it too — then move the file onto that empty placeholder. A
+			# check-then-rename leaves a window in which rename silently replaces
+			# a file that appeared in between.
+			try:
+				fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+			except FileExistsError:
 				n += 1
 				continue
-			os.rename(tmp_path, target)
+			os.close(fd)
+			try:
+				os.replace(tmp_path, target)
+			except BaseException:
+				try:
+					os.remove(target)
+				except OSError:
+					pass
+				raise
 			return name
 		os.remove(tmp_path)
 		return name

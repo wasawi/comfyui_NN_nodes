@@ -125,6 +125,28 @@ check("a clashing frame name moves both to _1",
       out4["ui"]["images"][0]["filename"] == "lonely_1.mp4" and (OUT / "lonely_1.png").is_file())
 check("the unrelated png is untouched", (OUT / "lonely.png").read_bytes().startswith(b"an unrelated"))
 
+# Volumes without hard links fall back to an exclusive create; that path must
+# refuse a taken name just as firmly.
+import errno
+
+_real_link = V.os.link
+
+
+def _no_link(*a, **k):
+	raise OSError(errno.EPERM, "hard links not supported here")
+
+
+V.os.link = _no_link
+try:
+	(OUT / "clashy.png").write_bytes(b"an unrelated image")
+	out5 = save(filename="clashy")
+	check("without hard links a clash still moves to _1",
+	      out5["ui"]["images"][0]["filename"] == "clashy_1.mp4"
+	      and (OUT / "clashy.png").read_bytes() == b"an unrelated image", out5["ui"])
+	check("and its frame still shares the number", (OUT / "clashy_1.png").is_file())
+finally:
+	V.os.link = _real_link
+
 # ---------- formats and options ----------
 
 out = save(filename="web", codec="av1")

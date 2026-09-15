@@ -49,6 +49,14 @@ reported instead of being silently swapped for another file.
 Saves images as PNG with the metadata record embedded in a `gen_meta` text
 chunk, alongside ComfyUI's own workflow chunk.
 
+**Never replaces a file.** If `image.png` exists the image becomes
+`image_1.png`, then `image_2.png`, … — the same numbering as the video writer.
+A batch is numbered the same way and keeps its order, so three images into a
+free name give `image.png`, `image_1.png`, `image_2.png`. Each image is written
+under a hidden temporary name and only then claimed, with a hard link or, on
+volumes without hard links, an exclusive create; both fail on a taken name, so
+saves racing for one name can't clobber each other.
+
 Writes run concurrently and share one deadline for the whole batch
 (`save_timeout`, 30s by default). Encoding a PNG costs milliseconds while the
 write can take seconds on network storage, so overlapping them is nearly all
@@ -68,7 +76,8 @@ still loads its workflow. The video is written by ComfyUI's own code — the sam
 - **Never replaces a file.** If `clip.mp4` exists the video becomes
   `clip_1.mp4`, then `clip_2.mp4`, … The final name is claimed with a hard link,
   which fails on a taken name, so two saves racing for one name can't clobber
-  each other; volumes without hard links check first and then rename.
+  each other; volumes without hard links use an exclusive create, which is just
+  as atomic.
 - **First frame as a PNG** (`save_first_frame`, on by default) next to the video,
   with the same number and the same metadata. The Metadata Reader only reads
   images, so this is what lets it pick a video's prompt as a reference; it also
