@@ -329,6 +329,85 @@ second = quiet_extract(load_reference=True, folder="output/editme", pick_mode="r
 check("prompt_filter in random mode sees an edited file",
       first == "before" and second == "after", (first, second))
 
+# ---------- prompt_filter: every word must appear, in any order ----------
+from meta_reader import parse_filter_terms
+
+check("splits on whitespace", parse_filter_terms("cat girl") == ["cat", "girl"])
+check("keeps a quoted run whole", parse_filter_terms('"blue eyes" cat') == ["blue eyes", "cat"])
+check("lowercases and trims", parse_filter_terms("  CAT   Girl ") == ["cat", "girl"])
+check("empty filter yields no terms", parse_filter_terms("   ") == [])
+
+words = OUT / "words"
+words.mkdir()
+for name, prompt in (
+	("both.json", "a cat, sitting, a girl, sunlit"),
+	("reversed.json", "girl with a cat"),
+	("onlycat.json", "a cat on a sofa"),
+	("onlygirl.json", "a girl running"),
+	("phrase.json", "blue eyes, long hair"),
+	("split.json", "blue sky, brown eyes"),
+):
+	(words / name).write_text(json.dumps({"id": name, "prompt": prompt}))
+
+ents = R._list_candidates(str(words), False, "name")
+names = lambda kept: sorted(p.name for p, _ in kept)
+
+check("words match in any order",
+      names(R._apply_prompt_filter(ents, "cat girl")) == ["both.json", "reversed.json"],
+      names(R._apply_prompt_filter(ents, "cat girl")))
+check("a phrase that is never adjacent still matches",
+      names(R._apply_prompt_filter(ents, "sitting sunlit cat")) == ["both.json"])
+check("one word behaves as before", len(R._apply_prompt_filter(ents, "cat")) == 3)
+check("case is ignored", names(R._apply_prompt_filter(ents, "CAT GiRl")) == ["both.json", "reversed.json"])
+check("a quoted run demands adjacency",
+      names(R._apply_prompt_filter(ents, '"blue eyes"')) == ["phrase.json"],
+      names(R._apply_prompt_filter(ents, '"blue eyes"')))
+check("unquoted, those words match apart too",
+      names(R._apply_prompt_filter(ents, "blue eyes")) == ["phrase.json", "split.json"])
+check("an empty filter passes everything through",
+      R._apply_prompt_filter(ents, "  ") is ents)
+
+# The failure must say which word is to blame.
+try:
+	R._apply_prompt_filter(ents, "cat unicorn", str(words))
+	check("names the word that matched nothing", False, "no error")
+except RuntimeError as e:
+	msg = str(e)
+	check("names the word that matched nothing",
+	      "'unicorn'" in msg and "no file contains" in msg, msg[:110])
+	check("reports a count for every term", "'cat' in 3" in msg and "'unicorn' in 0" in msg, msg[:160])
+	check("still says 'matched none' for older callers", "matched none" in msg)
+	check("names the folder searched", str(words) in msg)
+
+# Terms that each exist but never together get a different explanation.
+try:
+	R._apply_prompt_filter(ents, "sofa running", str(words))
+	check("explains terms that never co-occur", False, "no error")
+except RuntimeError as e:
+	check("explains terms that never co-occur",
+	      "never all of them in the same file" in str(e), str(e)[:110])
+
+# A promptless file is counted, not silently ignored.
+(words / "blank.json").write_text(json.dumps({"id": "blank", "prompt": ""}))
+M._prompt_cache.clear()
+ents2 = R._list_candidates(str(words), False, "name")
+try:
+	R._apply_prompt_filter(ents2, "unicorn", str(words))
+except RuntimeError as e:
+	check("counts files with no readable prompt", "no readable prompt" in str(e), str(e)[-90:])
+
+# The failure line printed by extract() must carry the settings.
+import io as _io, contextlib as _ctx
+buf = _io.StringIO()
+with _ctx.redirect_stdout(buf):
+	R.extract(load_reference=True, folder="output/words", pick_mode="random",
+	          prompt_filter="unicorn", unique_id="diag")
+log = buf.getvalue()
+check("failure log is unmissable", "NO PROMPT READ" in log, log[:80])
+check("failure log carries the settings",
+      "pick_mode='random'" in log and "prompt_filter='unicorn'" in log and "folder='output/words'" in log)
+check("failure log says what the output became", "falls back to input_prompt" in log)
+
 print()
 print("FAILED: " + ", ".join(fails) if fails else "ALL PASS")
 sys.exit(1 if fails else 0)

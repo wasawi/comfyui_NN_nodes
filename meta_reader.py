@@ -70,6 +70,27 @@ def _first(*values):
 	return None
 
 
+# prompt_filter terms: a "quoted run" stays whole, bare words stand alone.
+_FILTER_TERM_RE = re.compile(r'"([^"]*)"|(\S+)')
+
+
+def parse_filter_terms(needle: str) -> List[str]:
+	"""Split a prompt_filter into the terms a prompt must contain.
+
+	Every term must appear somewhere in the prompt, in any order. Prompts are
+	comma-separated tag lists, so the words of a phrase are almost never
+	adjacent: matching "cat girl" as one literal string finds nothing, while
+	requiring both words finds the prompts that actually mean it. Quote a run to
+	demand it literally.
+	"""
+	terms: List[str] = []
+	for quoted, bare in _FILTER_TERM_RE.findall(needle or ""):
+		term = (quoted if quoted else bare).strip().lower()
+		if term:
+			terms.append(term)
+	return terms
+
+
 def natural_sort_key(s: str):
 	return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", s)]
 
@@ -574,8 +595,13 @@ class MetaReader:
 						"default": "",
 						"multiline": False,
 						"tooltip": (
-							"If non-empty, the automatic pick modes only consider\n"
-							"files whose prompt contains this text (case-insensitive)."
+							"Narrows the automatic pick modes to matching prompts.\n\n"
+							"Every word must appear somewhere in the prompt, in any\n"
+							"order: 'cat girl' finds prompts holding both. Prompts are\n"
+							"comma-separated tag lists, so the words of a phrase are\n"
+							"rarely adjacent — quote a run (\"blue eyes\") to demand\n"
+							"those words together. Case-insensitive.\n\n"
+							"If nothing matches, the console names which word failed."
 						),
 					},
 				),
@@ -780,23 +806,44 @@ class MetaReader:
 		self,
 		entries: List[Tuple[Path, float]],
 		needle: str,
+		where: str = "",
 	) -> List[Tuple[Path, float]]:
-		"""Keep only files whose prompt contains `needle`, using the mtime-keyed
+		"""Keep only files whose prompt contains every term, using the mtime-keyed
 		cache so a big library isn't re-read on every run."""
-		needle = needle.strip().lower()
-		if not needle:
+		terms = parse_filter_terms(needle)
+		if not terms:
 			return entries
 
 		meta, _ = cached_prompts(entries)
+		texts = {str(p): meta.get(str(p), {}).get("prompt", "").lower() for p, _ in entries}
+		unreadable = sum(1 for t in texts.values() if not t)
 
-		kept = [e for e in entries if needle in meta.get(str(e[0]), {}).get("prompt", "").lower()]
-		if not kept:
-			raise RuntimeError(
-				f"[MetaReader] prompt_filter={needle!r} matched none of "
-				f"{len(entries)} files."
+		kept = [e for e in entries if all(t in texts[str(e[0])] for t in terms)]
+		shown = " + ".join(repr(t) for t in terms)
+		if kept:
+			print(
+				f"[MetaReader] prompt_filter {shown} kept {len(kept)}/{len(entries)} files"
+				+ (f" ({unreadable} carry no readable prompt)" if unreadable else "")
 			)
-		print(f"[MetaReader] prompt_filter={needle!r} kept {len(kept)}/{len(entries)}")
-		return kept
+			return kept
+
+		# Nothing matched. Say which term is to blame — with several terms the
+		# count per term is the difference between a typo and a real absence.
+		per_term = {t: sum(1 for x in texts.values() if t in x) for t in terms}
+		missing = [t for t, c in per_term.items() if c == 0]
+		detail = ", ".join(f"{t!r} in {c}" for t, c in per_term.items())
+		if missing:
+			why = f"no file contains {', '.join(repr(t) for t in missing)}"
+		else:
+			why = "each term appears, but never all of them in the same file"
+		raise RuntimeError(
+			f"[MetaReader] prompt_filter {shown} matched none of {len(entries)} files"
+			+ (f" in {where}" if where else "")
+			+ f" — {why}. Per term: {detail}."
+			+ (f" {unreadable} file(s) carry no readable prompt." if unreadable else "")
+			+ " Terms match anywhere in the prompt and all must be present;"
+			+ ' quote a run ("blue eyes") to demand those words together.'
+		)
 
 	def _next_cursor(self, node_key: str, step: int) -> int:
 		cur = self.__class__._cursors.get(node_key, 0)
@@ -889,6 +936,7 @@ class MetaReader:
 		fixed_index: int,
 		rng: random.Random,
 		node_key: str,
+		where: str = "",
 	) -> Tuple[str, Dict[str, Any]]:
 		"""Pick a file and read it, stepping past any that turn out to be
 		unreadable or promptless."""
@@ -914,8 +962,10 @@ class MetaReader:
 			return path, record
 
 		raise RuntimeError(
-			f"[MetaReader] No usable file in {len(skipped)} tried. "
-			f"Skipped: {'; '.join(skipped) if skipped else 'none'}"
+			f"[MetaReader] no usable file among the {len(paths)} candidate(s)"
+			+ (f" in {where}" if where else "")
+			+ f"; tried {len(skipped)} and every one failed. "
+			+ f"Skipped: {'; '.join(skipped) if skipped else 'none'}"
 		)
 
 	def _load_manual(self, reference: str) -> Tuple[str, Dict[str, Any]]:
@@ -1080,9 +1130,9 @@ class MetaReader:
 					)
 				return path, read_record(load_json_data(path))
 			else:
-				entries = self._apply_prompt_filter(entries, prompt_filter)
+				entries = self._apply_prompt_filter(entries, prompt_filter, str(resolved))
 				return self._pick_and_load(
-					entries, mode, fixed_index, rng, node_key
+					entries, mode, fixed_index, rng, node_key, str(resolved)
 				)
 
 	def extract(
@@ -1106,9 +1156,25 @@ class MetaReader:
 
 		def without_reference(reason=None):
 			if reason is not None:
+				# The empty prompt downstream is the only other symptom, so this
+				# line has to carry everything needed to place the failure: the
+				# settings in play, and what the node fell back to.
+				settings = [f"pick_mode={pick_mode!r}", f"folder={folder!r}"]
+				if (folder_override or "").strip():
+					settings.append(f"folder_override={folder_override!r}")
+				if (id_filter or "").strip():
+					settings.append(f"id_filter={id_filter!r}")
+				if (prompt_filter or "").strip():
+					settings.append(f"prompt_filter={prompt_filter!r}")
+				if str(pick_mode or "").lower() == "manual":
+					settings.append(f"reference={reference!r}")
+				if recursive:
+					settings.append("recursive=True")
 				print(
-					f"[MetaReader] no reference loaded ({reason}); "
-					f"continuing with input_prompt only."
+					f"[MetaReader] NO PROMPT READ — {reason}\n"
+					f"[MetaReader]   settings: {', '.join(settings)}\n"
+					f"[MetaReader]   output falls back to input_prompt "
+					f"({len(base_prompt)} chars); every other output is empty."
 				)
 			return {"result": (base_prompt, "", "", "", "", "", "", run_id)}
 

@@ -32,8 +32,12 @@ Picks one `.json` / `.png` / `.jpg` from a folder and outputs its prompt.
   Images only: a `.json` has nothing to show. In `manual` mode `folder` is
   ignored and JSON records are unreachable — use an automatic pick mode or
   `id_filter` for those.
-- **prompt_filter** — restricts the automatic modes to files whose prompt
-  contains the given text.
+- **prompt_filter** — restricts the automatic modes to matching prompts. Every
+  word must appear somewhere in the prompt, in any order, so `cat girl` finds
+  prompts holding both. Prompts are usually comma-separated tag lists, so the
+  words of a phrase are rarely adjacent — quote a run (`"blue eyes"`) to demand
+  them together. When nothing matches, the console gives a count per term, which
+  separates a typo from a word your library simply doesn't use.
 - **id_filter** — jumps straight to the file with a given `id`, reaching any
   file in the folder including `.json` records.
 - **run_id** — a fresh UUID per execution. Wire it to the writer's `id` so the
