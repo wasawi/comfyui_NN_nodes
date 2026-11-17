@@ -246,6 +246,9 @@ class MetaWriter:
 				# since the `prompt` widget above already claims that name.
 				"workflow_prompt": "PROMPT",
 				"extra_pnginfo": "EXTRA_PNGINFO",
+				# This node's own id (e.g. "22:45" inside a subgraph), recorded
+				# as gen_meta["node"] so a saved file says which writer made it.
+				"unique_id": "UNIQUE_ID",
 			},
 		}
 
@@ -264,6 +267,7 @@ class MetaWriter:
 		intermediate_prompt_3,
 		image_id,
 		parent_id,
+		node_id=None,
 	) -> dict:
 		meta = {"id": image_id}
 
@@ -284,6 +288,10 @@ class MetaWriter:
 			if text:
 				meta[f"intermediate_prompt_{idx}"] = text
 
+		# Absent for old callers: the key is then omitted, as before.
+		if node_id is not None and str(node_id).strip():
+			meta["node"] = str(node_id).strip()
+
 		return meta
 
 	def save_images(
@@ -301,6 +309,7 @@ class MetaWriter:
 		save_timeout=int(_SAVE_TIMEOUT_SECONDS),
 		workflow_prompt=None,
 		extra_pnginfo=None,
+		unique_id=None,
 	):
 		image_id = (id or "").strip() or str(uuid.uuid4())
 
@@ -312,6 +321,7 @@ class MetaWriter:
 			intermediate_prompt_3,
 			image_id,
 			parentId,
+			unique_id,
 		)
 		meta_json = json.dumps(meta, ensure_ascii=False)
 

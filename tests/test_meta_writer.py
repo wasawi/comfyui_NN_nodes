@@ -322,6 +322,31 @@ leftovers = [p.name for d in ("sub", "names") for p in (ROOT / "output" / d).ite
              if p.name.endswith(".tmp")]
 check("no partial .tmp files left behind", not leftovers, leftovers)
 
+# ---------- the writer's own node id ----------
+import json as _json
+from PIL import Image as _Image
+import meta_reader as _R
+
+
+def _gen_meta(res, d="sub"):
+	return _json.loads(_Image.open(ROOT / "output" / d / res["ui"]["images"][0]["filename"]).info["gen_meta"])
+
+
+_old = MetaWriter()._build_metadata("p1", "n1", "", "i2", "", "fixed-id", "par")
+_none = _gen_meta(MetaWriter().save_images(batch(1), "sub", "nid_none", "p1", "n1",
+                  intermediate_prompt_2="i2", id="fixed-id", parentId="par"))
+check("no unique_id: no node key, record unchanged", "node" not in _none and _none == _old, _none)
+for given in ("7", "22:45"):
+	m = _gen_meta(MetaWriter().save_images(batch(1), "sub", "nid_" + given.replace(":", "_"), "p1", "n1",
+	              intermediate_prompt_2="i2", id="fixed-id", parentId="par", unique_id=given))
+	rest = {k: v for k, v in m.items() if k != "node"}
+	check("node id written as given: " + given, m.get("node") == given and isinstance(m["node"], str), m)
+	check("nothing else changes with node " + given, rest == _old and list(rest) == list(_old))
+check("hidden input unique_id is declared", MetaWriter.INPUT_TYPES()["hidden"].get("unique_id") == "UNIQUE_ID")
+_p = ROOT / "output" / "sub" / "nid_22_45.png"
+_rd = _R.load_json_from_png(str(_p))
+check("reader still parses a record with node", _rd.get("prompt") == "p1" and _rd.get("node") == "22:45", _rd)
+
 print()
 print("FAILED: " + ", ".join(fails) if fails else "ALL PASS")
 sys.exit(1 if fails else 0)

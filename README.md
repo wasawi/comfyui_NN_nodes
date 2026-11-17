@@ -53,6 +53,8 @@ reported instead of being silently swapped for another file.
 Saves images as PNG with the metadata record embedded in a `gen_meta` text
 chunk, alongside ComfyUI's own workflow chunk.
 
+The record also carries `node`, the id of the writer node that saved the file (a string such as `"7"`, or `"22:45"` inside a subgraph), so parallel writers sharing a folder can be told apart. Files saved before it have no `node` key; the video writer records it too.
+
 **Never replaces a file.** If `image.png` exists the image becomes
 `image_1.png`, then `image_2.png`, … — the same numbering as the video writer.
 A batch is numbered the same way and keeps its order, so three images into a
